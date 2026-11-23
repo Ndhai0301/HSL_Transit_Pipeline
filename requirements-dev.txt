@@ -1,0 +1,21 @@
+# Local development & test environment (not used inside Docker services)
+
+# --- Spark ---
+# Must match the Spark version of the Docker cluster exactly
+pyspark==3.5.8
+
+# --- Ingestion (bridge MQTT -> Kafka) ---
+paho-mqtt~=2.1.0
+confluent-kafka
+
+# --- Database / HTTP ---
+psycopg2-binary
+requests
+
+# --- dbt ---
+dbt-core~=1.12.0
+dbt-postgres~=1.11.0
+
+# --- Dev tools ---
+pytest
+ruff
