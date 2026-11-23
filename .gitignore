@@ -1,0 +1,32 @@
+# --- Python environment ---
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# --- Secrets ---
+.env
+
+# --- Data lake: ignore all data, keep folder skeleton ---
+# Use lake/** (contents), not lake/ (the folder itself),
+# otherwise the !.gitkeep rule below cannot re-include files.
+lake/**
+!lake/**/
+!lake/**/.gitkeep
+
+# --- dbt ---
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+
+# --- Spark ---
+checkpoints/
+
+# --- Airflow ---
+airflow/logs/
+
+# --- Editor / OS ---
+.vscode/
+.DS_Store
+Thumbs.db
