@@ -15,6 +15,9 @@ lake/**
 !lake/**/
 !lake/**/.gitkeep
 
+# --- Profiling samples (Phase 1): raw captures, too large for git ---
+samples/
+
 # --- dbt ---
 dbt/target/
 dbt/logs/
