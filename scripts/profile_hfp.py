@@ -17,7 +17,8 @@ SCHEMA = MapType(StringType(), MapType(StringType(), StringType()))
 
 FIELDS = [
     "oper", "veh", "tst", "route", "desi", "dir", "oday", "start",
-    "stop", "loc", "lat", "long", "dl", "acc", "spd", "occu", "jrn", "line",
+    "stop", "loc", "lat", "long", "dl", "acc", "spd", "hdg", "occu", "jrn", "line",
+    "ttarr", "ttdep",  # scheduled arrival/departure at the stop (ARR/DEP only)
 ]
 
 parsed = raw.select(
@@ -175,3 +176,103 @@ print("    By event type:")
     .orderBy("event")
     .show(truncate=False)
 )
+
+# --- E: field quality (on deduplicated rows: copies would just multiply every count) ---
+print("\n=== E. Field quality (deduplicated) ===")
+LOCAL_TZ = "Europe/Helsinki"
+topic_parts = F.split("topic", "/")
+q = (
+    df.dropDuplicates(["event", "oper", "veh", "tst"])
+    .withColumn("topic_oper", topic_parts[7])
+    .withColumn("topic_veh", topic_parts[8])
+    .withColumn("topic_route", topic_parts[9])
+    .withColumn("topic_dir", topic_parts[10])
+    .withColumn("topic_next_stop", topic_parts[13])
+    .cache()
+)
+
+print("E1. Positioning source `loc` and missing coordinates")
+(
+    q.groupBy("event", "loc")
+    .agg(
+        F.count("*").alias("rows"),
+        F.sum(F.col("lat").isNull().cast("int")).alias("lat_null"),
+        F.sum(F.col("long").isNull().cast("int")).alias("long_null"),
+    )
+    .orderBy("event", "loc")
+    .show()
+)
+
+print("E2. Numeric ranges (min / p1 / p50 / p99 / max)")
+for name in ["spd", "acc", "hdg", "dl"]:
+    stats = q.select(
+        F.percentile_approx(F.col(name).cast("double"), [0.0, 0.01, 0.5, 0.99, 1.0]).alias("p"),
+        F.sum(F.col(name).isNull().cast("int")).alias("nulls"),
+    ).first()
+    print(f"    {name:<4} {stats['p']}  nulls={stats['nulls']}")
+print("    occu distinct values:", [r[0] for r in q.select("occu").distinct().collect()])
+
+print("E3. Route / designation: values containing letters")
+(
+    q.filter(F.col("route").rlike("[A-Za-z]") | F.col("desi").rlike("[A-Za-z]"))
+    .groupBy("route", "desi")
+    .agg(F.countDistinct("oper", "veh").alias("vehicles"), F.count("*").alias("rows"))
+    .orderBy("route")
+    .show(truncate=False)
+)
+print(f"    distinct routes: {q.select('route').distinct().count()}")
+
+print("E4. Payload vs topic consistency")
+(
+    q.agg(
+        F.sum((F.col("oper").cast("int") != F.col("topic_oper").cast("int")).cast("int")).alias("oper_diff"),
+        F.sum((F.col("veh").cast("int") != F.col("topic_veh").cast("int")).cast("int")).alias("veh_diff"),
+        F.sum((F.col("route") != F.col("topic_route")).cast("int")).alias("route_diff"),
+        F.sum((F.col("dir") != F.col("topic_dir")).cast("int")).alias("dir_diff"),
+    )
+    .show()
+)
+print("    dir values:", sorted(r[0] for r in q.select("dir").distinct().collect() if r[0]))
+print("    topic oper/veh are zero-padded? sample:",
+      q.select("topic_oper", "oper", "topic_veh", "veh").first())
+
+print("E5. ARR/DEP: stop in payload vs next_stop in topic")
+(
+    q.filter(F.col("event").isin("ARR", "DEP"))
+    .groupBy("event")
+    .agg(
+        F.count("*").alias("rows"),
+        F.sum(F.col("stop").isNull().cast("int")).alias("stop_null"),
+        F.sum((F.col("stop") == F.col("topic_next_stop")).cast("int")).alias("same_as_topic"),
+        F.sum((F.col("stop") != F.col("topic_next_stop")).cast("int")).alias("differs_from_topic"),
+    )
+    .orderBy("event")
+    .show()
+)
+
+print("E6. Time zones: `start` (Helsinki local) vs `tst` (UTC)")
+# Interpret oday + start as Helsinki wall-clock time, convert to UTC, compare with tst.
+start_utc = F.to_utc_timestamp(F.concat_ws(" ", "oday", "start"), LOCAL_TZ)
+mins_since_start = (F.unix_timestamp("tst_ts") - F.unix_timestamp(start_utc)) / 60
+(
+    q.filter("event = 'VP'")
+    .select(F.percentile_approx(mins_since_start, [0.0, 0.01, 0.5, 0.99, 1.0]).alias("p"))
+    .show(truncate=False)
+)
+print("    (min since scheduled trip start, as Helsinki time. ~0..90 = correct;"
+      " values near -120 would mean start was wrongly read as UTC)")
+print("    oday values:", sorted(r[0] for r in q.select("oday").distinct().collect() if r[0]))
+
+print("E7. DEP: delay from schedule (tst - ttdep) vs field dl")
+dep = (
+    q.filter("event = 'DEP'")
+    .withColumn("delay_sched_s",
+                F.unix_timestamp("tst_ts") - F.unix_timestamp(F.to_timestamp("ttdep")))
+    .withColumn("delay_dl_s", -F.col("dl").cast("int"))  # dl < 0 means late
+    .withColumn("diff_s", F.col("delay_sched_s") - F.col("delay_dl_s"))
+)
+print(f"    DEP rows: {dep.count()} | ttdep null: {dep.filter('ttdep is null').count()}")
+dep.select(
+    F.percentile_approx("delay_sched_s", [0.01, 0.5, 0.99]).alias("sched_delay_p1_p50_p99"),
+    F.percentile_approx("diff_s", [0.01, 0.5, 0.99]).alias("diff_vs_dl_p1_p50_p99"),
+).show(truncate=False)
