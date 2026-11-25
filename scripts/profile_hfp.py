@@ -1,6 +1,6 @@
 import sys
 
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import MapType, StringType
 
@@ -176,6 +176,72 @@ print("    By event type:")
     .orderBy("event")
     .show(truncate=False)
 )
+
+# --- D: lateness, out-of-order arrival, and what a watermark would drop ---
+print("\n=== D. Lateness and out-of-order arrival ===")
+
+# D1: wall-clock lateness. Includes the machine's clock offset -> read p99 - p50 more than p50.
+print("D1. received_ts - tst (s), p50/p95/p99/p99.9/max, by event (affected by local clock offset)")
+(
+    df.groupBy("event")
+    .agg(
+        F.percentile_approx("lateness_s", [0.5, 0.95, 0.99, 0.999]).alias("p50_p95_p99_p999"),
+        F.max("lateness_s").alias("max"),
+        F.min("lateness_s").alias("min"),
+    )
+    .orderBy("event")
+    .show(truncate=False)
+)
+
+# D2: per-vehicle out-of-order: a message sent earlier (smaller tst) arrives after a later one.
+dedup = df.dropDuplicates(["event", "oper", "veh", "tst"])
+w_veh = Window.partitionBy("event", "oper", "veh").orderBy("received_ts", "tst_ts")
+ooo = (
+    dedup.withColumn("max_prev_tst", F.max("tst_ts").over(w_veh.rowsBetween(Window.unboundedPreceding, -1)))
+    .withColumn("back_s", (F.unix_micros("max_prev_tst") - F.unix_micros("tst_ts")) / 1e6)
+)
+print("D2. Per vehicle: messages arriving after a message with a later tst")
+(
+    ooo.groupBy("event")
+    .agg(
+        F.count("*").alias("rows"),
+        F.sum((F.col("back_s") > 0).cast("int")).alias("out_of_order"),
+        F.max("back_s").alias("max_back_s"),
+    )
+    .orderBy("event")
+    .show()
+)
+
+# D3: what Spark's watermark sees. Watermark = max(tst seen so far, whole stream) - delay.
+# A row whose tst is more than `delay` behind that running max is dropped as late.
+# Uses only tst and arrival order -> independent of the local clock.
+w_all = Window.orderBy("received_ts", "tst_ts").rowsBetween(Window.unboundedPreceding, 0)
+behind = (
+    df.withColumn("stream_max_tst", F.max("tst_ts").over(w_all))
+    .withColumn("behind_s", (F.unix_micros("stream_max_tst") - F.unix_micros("tst_ts")) / 1e6)
+    .cache()
+)
+print("D3. Event-time lag behind the stream's max tst (s), p50/p99/p99.9/max, by event")
+(
+    behind.groupBy("event")
+    .agg(
+        F.percentile_approx("behind_s", [0.5, 0.99, 0.999]).alias("p50_p99_p999"),
+        F.max("behind_s").alias("max"),
+    )
+    .orderBy("event")
+    .show(truncate=False)
+)
+print("    Rows a watermark of N seconds would drop as late:")
+(
+    behind.groupBy("event")
+    .agg(*[F.sum((F.col("behind_s") > n).cast("int")).alias(f">{n}s") for n in [5, 10, 30, 60, 120]])
+    .orderBy("event")
+    .show()
+)
+print("    Worst offenders (most behind):")
+behind.orderBy(F.desc("behind_s")).select(
+    "event", "oper", "veh", "route", "tst_ts", "received_ts", "behind_s"
+).show(5, truncate=False)
 
 # --- E: field quality (on deduplicated rows: copies would just multiply every count) ---
 print("\n=== E. Field quality (deduplicated) ===")
