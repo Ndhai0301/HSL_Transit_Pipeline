@@ -48,7 +48,7 @@ services:
         condition: service_healthy
 
   warehouse:
-    image: timescale/timescaledb:latest-pg16   # pin an exact version after first pull (see below)
+    image: timescale/timescaledb:2.32.1-pg16   # pin an exact version after first pull (see below)
     ports:
       - "5432:5432"
     environment:
@@ -64,7 +64,10 @@ services:
       TIMESCALEDB_TELEMETRY: "off"
     volumes:
       - warehouse-data:/var/lib/postgresql/data
-      - ./warehouse/init:/docker-entrypoint-initdb.d:ro
+      # Mount files one by one: mounting the whole folder would hide the image's own
+      # 000_install_timescaledb.sh / 001_timescaledb_tune.sh
+      - ./warehouse/init/01_roles.sh:/docker-entrypoint-initdb.d/101_roles.sh:ro
+      - ./warehouse/init/02_schema.sql:/docker-entrypoint-initdb.d/102_schema.sql:ro
     shm_size: 256mb                    # Docker's default 64 MB breaks parallel queries
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
