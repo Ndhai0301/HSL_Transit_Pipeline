@@ -47,5 +47,32 @@ services:
       kafka:
         condition: service_healthy
 
+  warehouse:
+    image: timescale/timescaledb:latest-pg16   # pin an exact version after first pull (see below)
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Read by the init scripts in warehouse/init (step 2.4) to create roles
+      PIPELINE_PASSWORD: ${PIPELINE_PASSWORD}
+      BI_READER_PASSWORD: ${BI_READER_PASSWORD}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      TZ: UTC                          # server default time zone: all timestamps in UTC
+      TS_TUNE_MEMORY: 1GB              # timescaledb-tune sizes memory for 1 GB, not the whole host
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - warehouse-data:/var/lib/postgresql/data
+      - ./warehouse/init:/docker-entrypoint-initdb.d:ro
+    shm_size: 256mb                    # Docker's default 64 MB breaks parallel queries
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
 volumes:
   kafka-data:
+  warehouse-data:
